@@ -14,6 +14,45 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find and unpack Android source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' archives < <(find . -maxdepth 2 -type f -iname '*.zip' -not -path './.git/*' -print0)
+          if (( ${#archives[@]} == 0 )); then
+            echo 'No source ZIP found. Upload an Android source ZIP to the repository.' >&2
+            exit 1
+          fi
+          # Choose the ZIP most recently changed in Git; break ties by filename.
+          selected=''
+          newest=-1
+          for archive in "${archives[@]}"; do
+            path="${archive#./}"
+            stamp="$(git log -1 --format=%ct -- "$path")"
+            stamp="${stamp:-0}"
+            if (( stamp > newest )) || { (( stamp == newest )) && [[ "$path" > "$selected" ]]; }; then
+              selected="$path"
+              newest="$stamp"
+            fi
+          done
+          echo "Selected source archive: $selected"
+          mkdir -p "$RUNNER_TEMP/marketplace-source"
+          unzip -q "$selected" -d "$RUNNER_TEMP/marketplace-source"
+          mapfile -d '' projects < <(find "$RUNNER_TEMP/marketplace-source" -maxdepth 5 -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print0)
+          if (( ${#projects[@]} != 1 )); then
+            echo "Expected exactly one Android Gradle project, found ${#projects[@]}." >&2
+            exit 1
+          fi
+          project_dir="$(dirname "${projects[0]}")"
+          if [[ ! -d "$project_dir/app" ]]; then
+            echo "Missing app module in $project_dir" >&2
+            exit 1
+          fi
+          echo "PROJECT_DIR=$project_dir" >> "$GITHUB_ENV"
+          echo "Android project: $project_dir"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -21,19 +60,18 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Configure Android SDK
+      - name: Configure preinstalled Android SDK
         shell: bash
         run: |
           set -euo pipefail
-          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
-          if [[ -z "$SDK_DIR" || ! -d "$SDK_DIR" ]]; then
-            echo 'Android SDK is not installed on this runner' >&2
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [[ -z "$sdk" || ! -d "$sdk" ]]; then
+            echo 'Android SDK not found on runner' >&2
             exit 1
           fi
-          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
-          echo "Using Android SDK: $SDK_DIR"
-          ls "$SDK_DIR"
+          echo "ANDROID_HOME=$sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk" >> "$GITHUB_ENV"
+          echo "Using SDK: $sdk"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -44,34 +82,36 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -f ./gradlew ]]; then
-            chmod +x ./gradlew
+          cd "$PROJECT_DIR"
+          if [[ -f gradlew ]]; then
+            chmod +x gradlew
             ./gradlew --no-daemon assembleDebug
           else
             gradle --no-daemon assembleDebug
           fi
 
-      - name: Package APK into ZIP
+      - name: Create numbered APK ZIP
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          mapfile -d '' apks < <(find . -type f -path '*/build/outputs/apk/*' -name '*.apk' -print0)
+          mapfile -d '' apks < <(find "$PROJECT_DIR" -type f -path '*/build/outputs/apk/debug/*.apk' -print0)
           if (( ${#apks[@]} == 0 )); then
-            echo 'No APK files found' >&2
+            echo 'No debug APK produced' >&2
             exit 1
           fi
           for apk in "${apks[@]}"; do
             cp "$apk" "dist/$(basename "$apk")"
           done
-          (cd dist && zip -q "Marketplace-APK-build-${GITHUB_RUN_NUMBER}.zip" ./*.apk)
+          zip -j "dist/Marketplace-APK-build-${GITHUB_RUN_NUMBER}.zip" dist/*.apk
+          ls -lh dist/
 
-      - name: Upload ZIP and APK
+      - name: Upload APK and ZIP
         uses: actions/upload-artifact@v4
         with:
           name: Marketplace-build-${{ github.run_number }}
           path: |
-            dist/*.zip
             dist/*.apk
+            dist/*.zip
           if-no-files-found: error
           retention-days: 30
