@@ -22,11 +22,18 @@ jobs:
           java-version: '17'
 
       - name: Configure Android SDK
-  shell: bash
-  run: |
-    echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-    echo "Android SDK: $ANDROID_SDK_ROOT"
-    ls "$ANDROID_SDK_ROOT"
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [[ -z "$SDK_DIR" || ! -d "$SDK_DIR" ]]; then
+            echo 'Android SDK is not installed on this runner' >&2
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "Using Android SDK: $SDK_DIR"
+          ls "$SDK_DIR"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -36,6 +43,7 @@ jobs:
       - name: Build debug APK
         shell: bash
         run: |
+          set -euo pipefail
           if [[ -f ./gradlew ]]; then
             chmod +x ./gradlew
             ./gradlew --no-daemon assembleDebug
@@ -48,15 +56,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          mapfile -d '' apks < <(find . -type f -path '*/build/outputs/apk/debug/*.apk' -print0)
+          mapfile -d '' apks < <(find . -type f -path '*/build/outputs/apk/*' -name '*.apk' -print0)
           if (( ${#apks[@]} == 0 )); then
-            echo 'No debug APK files found' >&2
+            echo 'No APK files found' >&2
             exit 1
           fi
           for apk in "${apks[@]}"; do
-            cp "$apk" dist/"$(basename "$(dirname "$(dirname "$(dirname "$apk")")")")-"$(basename "$apk")"
+            cp "$apk" "dist/$(basename "$apk")"
           done
-          zip -j "dist/Marketplace-APK-build-${GITHUB_RUN_NUMBER}.zip" dist/*.apk
+          (cd dist && zip -q "Marketplace-APK-build-${GITHUB_RUN_NUMBER}.zip" ./*.apk)
 
       - name: Upload ZIP and APK
         uses: actions/upload-artifact@v4
